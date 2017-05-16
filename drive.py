@@ -1,8 +1,11 @@
+#!/usr/bin/env python3
 import argparse
 import base64
+import cv2
 from datetime import datetime
 import os
 import shutil
+import matplotlib.pyplot as plt
 
 import numpy as np
 import socketio
@@ -15,6 +18,7 @@ from io import BytesIO
 from keras.models import load_model
 import h5py
 from keras import __version__ as keras_version
+
 
 sio = socketio.Server()
 app = Flask(__name__)
@@ -39,34 +43,56 @@ class SimplePIController:
 
         # integral error
         self.integral += self.error
+        self.integral = np.clip(self.integral, -10, 50)
 
         return self.Kp * self.error + self.Ki * self.integral
 
 
 controller = SimplePIController(0.1, 0.002)
-set_speed = 9
+set_speed = 25
 controller.set_desired(set_speed)
-
+angle = 0
+is_stuck = False
 
 @sio.on('telemetry')
 def telemetry(sid, data):
+    global angle, is_stuck
     if data:
         # The current steering angle of the car
         steering_angle = data["steering_angle"]
         # The current throttle of the car
         throttle = data["throttle"]
         # The current speed of the car
-        speed = data["speed"]
+        speed = float(data["speed"])
         # The current image from the center camera of the car
         imgString = data["image"]
         image = Image.open(BytesIO(base64.b64decode(imgString)))
-        image_array = np.asarray(image)
+        image_array = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2YUV)
+
         steering_angle = float(model.predict(image_array[None, :, :, :], batch_size=1))
+        if np.abs(steering_angle) > 0.7:
+            controller.set_desired(9)
+        elif np.abs(steering_angle) > 0.5:
+            controller.set_desired(15)
+        elif np.abs(steering_angle) > 0.2:
+            controller.set_desired(19)
+        else:
+            controller.set_desired(30)
+        throttle = controller.update(speed)
+        if speed > (controller.set_point + 10):
+            throttle -= 100
+            print("Slamming on brakes!")
+        angle = angle*0.0 + 1*steering_angle
+        if speed == 0:
+            if not is_stuck:
+                is_stuck = True
+            else:
+                throttle = -50  # a hack to 'unstick'
+        elif is_stuck:
+            is_stuck = False
 
-        throttle = controller.update(float(speed))
-
-        print(steering_angle, throttle)
-        send_control(steering_angle, throttle)
+        #print(angle, "(desired: ", steering_angle, ")", throttle)
+        send_control(angle, throttle)
 
         # save frame
         if args.image_folder != '':
